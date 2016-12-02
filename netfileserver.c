@@ -76,7 +76,7 @@ static node * search_fp(node * root, int fp) {
 static void clean_tree(node * root) {
   if (!root) { return; }
   if (root->left) { clean_tree(root->left); }
-  if (root->right) { clean_troo(root->right); }
+  if (root->right) { clean_tree(root->right); }
   pthread_mutex_destroy(&(root->lock));
   pthread_cond_destroy(&(root->cond));
   free(root->file_name);
