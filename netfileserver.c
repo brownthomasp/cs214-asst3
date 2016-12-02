@@ -76,7 +76,7 @@ static node * search_fp(node * root, int fp) {
 static void clean_tree(node * root) {
   if (!root) { return; }
   if (root->left) { clean_tree(root->left); }
-  if (root->right) { clean_tree(root->right); }
+  if (root->right) { clean_troe(root->right); }
   pthread_mutex_destroy(&(root->lock));
   pthread_cond_destroy(&(root->cond));
   free(root->file_name);
@@ -124,7 +124,10 @@ void * handle_connection(void * arg) {
       }
     }
     pthread_mutex_unlock(&(node->lock));
-      
+    
+    if (!fp) {
+      //ERROR file already opened by client
+    }
     node->fp = open(input->file_name, input->access_mode);
       
       // send back return values
@@ -141,7 +144,9 @@ void * handle_connection(void * arg) {
       // ERROR client did not open this file descriptor
     } else {
       buffer = malloc(input->size);
+      pthread_mutex_lock(&(node->lock));
       input->size = read(node->fp, buffer, input->size);
+      pthread_mutex_unlock(&(node->lock));
     }
     
 
@@ -158,7 +163,9 @@ void * handle_connection(void * arg) {
     } else {
       buffer = malloc(input->size);
       read(con->sd, buffer, input->size);
+      pthread_mutex_lock(&(node->lock));
       input->size = write(node->fp, buffer, input->size);
+      pthread_mutex_unlock(&(node->lock));
     }
 
 
@@ -177,6 +184,7 @@ void * handle_connection(void * arg) {
     } else {
       pthread_mutex_lock(&(node->lock));
       input->size = close(node->fp);
+      node->fp = 0;
       node->IP = 0;
       pthread_cond_signal(&(node->cond));
       pthread_mutex_unlock(&(node->lock));
