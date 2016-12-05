@@ -96,7 +96,7 @@ static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void * handle_connection(void * arg) {
 
-  connection * con = arg;
+  connection * con = (connection *)arg;
   int files_open = 0;
 
   // receive request from client
@@ -105,7 +105,7 @@ void * handle_connection(void * arg) {
   node * node;
 
   read(con->sd, buffer, sizeof(pack));
-  input = buffer;;
+  input = buffer;
 
   switch (input->op_code) {
   case 0 : // open file
@@ -204,7 +204,7 @@ void * handle_connection(void * arg) {
   // free buffer and close connection
   free(buffer);
   close(con->sd);
-  con->sd = -1;
+  con->sd = 0;
 
   return 0;
 
@@ -213,56 +213,91 @@ void * handle_connection(void * arg) {
 
 int main(int argc, char ** argv) {
 
+	//Set up socket for IPv4 (TCP/IP) connections.
   int socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_desc == -1) {
-    fprintf(stderr, "ERROR: failed to aquire socket\n");
+    fprintf(stderr, "ERROR: failed to acquire socket for incoming connections.\n");
     return -1;
   }
 
+  //Get IPv4 address such that incoming connections will come to <address>:9999
   struct sockaddr_in server;
   server.sin_family = AF_INET;
   server.sin_addr.s_addr = INADDR_ANY;
   server.sin_port = htons(9999);
 
+  //Bind address to previous socket.
   if (bind(socket_desc, (struct sockaddr *)&server, sizeof(server)) < 0) {
-    fprintf(stderr, "ERROR: failed to bind\n");
-    return -1;
+    fprintf(stderr, "ERROR: failed to bind address to socket.\n");
+    return -2;
   }
 
-
-  // array to store thread reffernece variables
+  //Store child/worker threads (one per connection).
   pthread_t threads[100];
   int i;
-  for (i = 0; i < 100; i++) { connections[i].sd = -1; }
+  
+  //Zero out connection socket descriptors.
+  //Per described functionality, we want network descriptors to be all negative integers.
+  //Positive integers may correspond to objects on the client's local filesystem.
+  for (i = 0; i < 100; i++) { connections[i].sd = 0; }
 
+  //Get address info of client as well size of the struct.
   struct sockaddr_in client;
-  int c = sizeof(struct sockaddr_in);
+  int client_size = sizeof(struct sockaddr_in);
 
-  while (1) {
-    listen(socket_desc, 5);
-    
-    //find the first unused socket descriptor
-    i = 0;
-    while (connections[i].sd >= 0) { 
-      i++;
-      if (i == 100) {  }  // want to have this wait for an available descriptor
-
+  //Attempt to listen for incoming connections.
+  //According to manpage of listen, this can fail if:
+  //-another socket is listening on this port
+  //-socket_desc is malformed
+  if (listen(socket_desc, 5) < 0) {
+    fprintf(stderr, "ERROR: cannot listen for connections on specified socket.\n");
+	return -3;
+  }
+  
+  //Changed this and nested while loop to use a descriptive name of what they do.
+  //I am acknowledging that while(1) is functionally just as good.
+  int accepting_new_connections = 1;
+  while (accepting_new_connections) {
+    //Spool over available connection "slots" and see if we can find an open one.
+	//If there exists some sd such that sd = 0, that connection "slot" is available.
+	i = 0;
+	int searching_for_available_connection = 1;
+    while (searching_for_available_connection) { 
+      if (i == 100) {
+		  i = 0;
+		  continue;
+	  }
+	  
+	  //When a thread finishes, it sets its connection->sd to zero, so we know if a slot is avaialble.
+	  if (connectors[i].sd == 0) {
+		  break;
+	  }
+	  
+	  i++;
    }
 
-    connections[i].sd = accept(socket_desc, (struct sockaddr *)&client, &c);
+    //Try to accept the incoming connection in this "slot".
+	//On failure, skip it and go back to looking for available slots.
+    connections[i].sd = accept(socket_desc, (struct sockaddr *)&client, &client_size);
     if (connections[i].sd < 0) {
-      fprintf(stderr, "ERROR: failed to accept\n");
+      fprintf(stderr, "ERROR: failed to accept incoming connection.\n");
+	  continue;
     }
 
     connections[i].IP = client.sin_addr.s_addr;
 
-    if (!pthread_create(&threads[i], NULL, &handle_connection, (void *)&connections[i])) {
-      fprintf(stderr, "ERROR: Failed to create thread for client connection\n");
+	//Create thread. On error, go back to looking for connection slots.
+    if (pthread_create(&threads[i], NULL, &handle_connection, (void *)&connections[i])) {
+      fprintf(stderr, "ERROR: failed to create thread for client connection.\n");
+	  continue;
     }
-
+	
+	//Detach thread.
+	if (pthread_detach(threads[i]) {
+		fprintf(stderr, "ERROR: could not detach a worker thread.\n");
+	}
+	
   }
-
-  // how to we join threads if the loop does not exit?
 
   return 0;
 }
