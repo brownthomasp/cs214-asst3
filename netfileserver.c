@@ -259,43 +259,43 @@ int main(int argc, char ** argv) {
   int accepting_new_connections = 1;
   while (accepting_new_connections) {
     //Spool over available connection "slots" and see if we can find an open one.
-	//If there exists some sd such that sd = 0, that connection "slot" is available.
-	i = 0;
-	int searching_for_available_connection = 1;
+    //If there exists some sd such that sd = 0, that connection "slot" is available.
+    i = 0;
+    int searching_for_available_connection = 1;
     while (searching_for_available_connection) { 
       if (i == 100) {
-		  i = 0;
-		  continue;
-	  }
+        i = 0;
+        continue;
+      }
 	  
 	  //When a thread finishes, it sets its connection->sd to zero, so we know if a slot is avaialble.
-	  if (connectors[i].sd == 0) {
-		  break;
-	  }
+      if (connectors[i].sd == 0) {
+        break;
+      }
 	  
-	  i++;
+      i++;
    }
 
     //Try to accept the incoming connection in this "slot".
-	//On failure, skip it and go back to looking for available slots.
+    //On failure, skip it and go back to looking for available slots.
     connections[i].sd = accept(socket_desc, (struct sockaddr *)&client, &client_size);
     if (connections[i].sd < 0) {
       fprintf(stderr, "ERROR: failed to accept incoming connection.\n");
-	  continue;
+        continue;
     }
 
     connections[i].IP = client.sin_addr.s_addr;
 
-	//Create thread. On error, go back to looking for connection slots.
+    //Create thread. On error, go back to looking for connection slots.
     if (pthread_create(&threads[i], NULL, &handle_connection, (void *)&connections[i])) {
       fprintf(stderr, "ERROR: failed to create thread for client connection.\n");
 	  continue;
     }
 	
-	//Detach thread.
-	if (pthread_detach(threads[i]) {
-		fprintf(stderr, "ERROR: could not detach a worker thread.\n");
-	}
+    //Detach thread.
+    if (pthread_detach(threads[i]) {
+      fprintf(stderr, "ERROR: could not detach a worker thread.\n");
+    }
 	
   }
 
