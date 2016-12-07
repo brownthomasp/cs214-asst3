@@ -42,7 +42,7 @@ static node * new_node(node * left, node * right, char * file_name) {
   pthread_mutex_init(&(new->lock), NULL);
   pthread_cond_init(&(new->cond), NULL);
   new->IP = 0;
-  new->fp = 0;
+  new->fp = -1;
   
   return new;
 }
@@ -93,6 +93,10 @@ static connection connections[100];
 static node * root;
 static pthread_mutex_t root_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static int connection_count;
+static pthread_mutex_t count_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t count_cond = PTHREAD_COND_INITIALIZER;
+
 
 void * handle_connection(void * arg) {
 
@@ -106,8 +110,6 @@ void * handle_connection(void * arg) {
 
   read(con->sd, buffer, sizeof(pack));
   input = buffer;
-
-  int size = input->size;
 
   switch (input->op_code) {
   case 0 : // open file
@@ -127,14 +129,15 @@ void * handle_connection(void * arg) {
     }
     pthread_mutex_unlock(&(node->lock));
     
-    if (!fp) {
+    if (node->fp != -1) {
       //ERROR file already opened by client
-      // we shoul probably set our own error code for this
+      errno = EPERM;  //macro for "operation not permitted"
+      input->size = -1;
+    } else {
+      node->fp = open(input->file_name, input->access_mode);
+      input->size = node->fp;
     }
-    node->fp = open(input->file_name, input->access_mode);
 
-    // set return values
-    input->size = node->fp;
     input->op_code = errno;
 
     // send back return values
@@ -150,10 +153,11 @@ void * handle_connection(void * arg) {
     if (!node || node->IP != con->IP) {
       // ERROR file descriptor was not opened by this client
       // either doesn't exist or was opened by another
+      errno = EPERM; // macro for "operation not permitted"
     } else {
-      buffer = malloc(size);
+      buffer = malloc(input->size);
       pthread_mutex_lock(&(node->lock));
-      input->size = read(node->fp, buffer, size);
+      input->size = read(node->fp, buffer, input->size);
       pthread_mutex_unlock(&(node->lock));
     }
     
@@ -161,15 +165,21 @@ void * handle_connection(void * arg) {
 
     // send back return values
     write(con->sd, input, sizeof(pack));
-    write(con->sd, buffer, size);
+    if (input->size > 0) {
+	write(con->sd, buffer, input->size);
+    }
+
+    break;
 
   case 2: // write to file
+    // find the given file descriptor
     pthread_mutex_lock(&root_lock);
     node = search_fp(root, input->fp);
     pthread_mutex_unlock(&root_lock);
     if (!node || node->IP != con->IP) {
       // ERROR file descriptor was not opened by this client
       // either doesn't exist or opened by another
+      errno = EPERM;
     } else {
       buffer = malloc(input->size);
       read(con->sd, buffer, input->size);
@@ -189,14 +199,13 @@ void * handle_connection(void * arg) {
     pthread_mutex_lock(&root_lock);
     node = search_fp(root, input->fp);
     pthread_mutex_unlock(&root_lock);
-    if (!node) {
-      // ERROR file descriptor not found
-    } else if (node->IP != con->IP) {
+    if (!node || node->IP != con->IP) {
       // ERROR client did not open this file descriptor
+      errno = EPERM;
     } else {
       pthread_mutex_lock(&(node->lock));
       input->size = close(node->fp);
-      node->fp = 0;
+      node->fp = -1;
       node->IP = 0;
       pthread_cond_signal(&(node->cond));
       pthread_mutex_unlock(&(node->lock));
@@ -219,7 +228,13 @@ void * handle_connection(void * arg) {
   // free buffer and close connection
   free(buffer);
   close(con->sd);
-  con->sd = 0;
+  con->sd = -1;
+
+  // decrament the connection count and signal
+  pthread_mutex_lock(&count_lock);
+  connection_count--;
+  pthread_cond_signal(&count_cond);
+  pthread_mutex_unlock(&count_lock);
 
   return 0;
 
@@ -254,7 +269,7 @@ int main(int argc, char ** argv) {
   //Zero out connection socket descriptors.
   //Per described functionality, we want network descriptors to be all negative integers.
   //Positive integers may correspond to objects on the client's local filesystem.
-  for (i = 0; i < 100; i++) { connections[i].sd = 0; }
+  for (i = 0; i < 100; i++) { connections[i].sd = -1; }
 
   //Get address info of client as well size of the struct.
   struct sockaddr_in client;
@@ -278,18 +293,24 @@ int main(int argc, char ** argv) {
     i = 0;
     int searching_for_available_connection = 1;
     while (searching_for_available_connection) { 
-      if (i == 100) {
-        i = 0;
-        continue;
-      }
-	  
-	  //When a thread finishes, it sets its connection->sd to zero, so we know if a slot is avaialble.
-      if (connectors[i].sd == 0) {
+      //When a thread finishes, it sets its connection->sd to -1, so we know if a slot is avaialble.
+      if (connectors[i].sd == -1) {
         break;
       }
-	  
+      
       i++;
-   }
+      
+      // on failure to find a free connection slot check the connection count and 
+      // wait for a slot to be freed if there are none
+      if (i == 100) {
+	pthread_mutex_lock(&count_lock);
+	if (connections_count == 100) {
+	  pthread_cond_wait(&count_cond, &count_wait);
+	}
+	pthread_unlock(&count_lock);
+	i = 0;
+      }
+    }
 
     //Try to accept the incoming connection in this "slot".
     //On failure, skip it and go back to looking for available slots.
@@ -299,17 +320,26 @@ int main(int argc, char ** argv) {
         continue;
     }
 
+    //Record the address of the connection
     connections[i].IP = client.sin_addr.s_addr;
 
     //Create thread. On error, go back to looking for connection slots.
     if (pthread_create(&threads[i], NULL, &handle_connection, (void *)&connections[i])) {
       fprintf(stderr, "ERROR: failed to create thread for client connection.\n");
+      connections[i].sd = -1;
 	  continue;
     }
 	
     //Detach thread.
-    if (pthread_detach(threads[i]) {
+    if (pthread_detach(threads[i])) {
       fprintf(stderr, "ERROR: could not detach a worker thread.\n");
+    }
+
+    if (connections[i].sd > -1) {
+      //Incrament the connection counter if there are no failures
+      pthread_mutex_lock(&count_lock);
+      connection_count++;
+      pthread_mutex_unlock(&count_lock);
     }
 	
   }
