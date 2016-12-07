@@ -107,6 +107,8 @@ void * handle_connection(void * arg) {
   read(con->sd, buffer, sizeof(pack));
   input = buffer;
 
+  int size = input->size;
+
   switch (input->op_code) {
   case 0 : // open file
     // search the file tree for the given file and obtain the associated node
@@ -127,39 +129,47 @@ void * handle_connection(void * arg) {
     
     if (!fp) {
       //ERROR file already opened by client
+      // we shoul probably set our own error code for this
     }
     node->fp = open(input->file_name, input->access_mode);
-      
-      // send back return values
+
+    // set return values
+    input->size = node->fp;
+    input->op_code = errno;
+
+    // send back return values
+    write(con->sd, input, sizeof(pack));
 
     break;
 
   case 1: // read from file
+    // obtain lock for access to the tree then search for the given file descriptor
     pthread_mutex_lock(&root_lock);
     node = search_fp(root, input->fp);
     pthread_mutex_unlock(&root_lock);
-    if (!node) {
-      // ERROR file descriptor not found
-    } else if (node->IP != con->IP) {
-      // ERROR client did not open this file descriptor
+    if (!node || node->IP != con->IP) {
+      // ERROR file descriptor was not opened by this client
+      // either doesn't exist or was opened by another
     } else {
-      buffer = malloc(input->size);
+      buffer = malloc(size);
       pthread_mutex_lock(&(node->lock));
-      input->size = read(node->fp, buffer, input->size);
+      input->size = read(node->fp, buffer, size);
       pthread_mutex_unlock(&(node->lock));
     }
     
+    input->op_code = errno;
 
     // send back return values
+    write(con->sd, input, sizeof(pack));
+    write(con->sd, buffer, size);
 
   case 2: // write to file
     pthread_mutex_lock(&root_lock);
     node = search_fp(root, input->fp);
     pthread_mutex_unlock(&root_lock);
-    if (!node) {
-      // ERROR file descriptor not found
-    } else if (node->IP != con->IP) {
-      // ERROR client did not open this file descriptor
+    if (!node || node->IP != con->IP) {
+      // ERROR file descriptor was not opened by this client
+      // either doesn't exist or opened by another
     } else {
       buffer = malloc(input->size);
       read(con->sd, buffer, input->size);
@@ -168,8 +178,10 @@ void * handle_connection(void * arg) {
       pthread_mutex_unlock(&(node->lock));
     }
 
+    input->op_code = errno;
 
     // send back return values
+    write(con->sd, input, sizeof(pack));
 
     break;
 
@@ -190,14 +202,17 @@ void * handle_connection(void * arg) {
       pthread_mutex_unlock(&(node->lock));
     }
 
+    input->op_code = errno;
 
     // send back return values
+    write(con->sd, input, sizeof(pack));
 
     break;
     
   default :
 
-    // ERROR
+    // ERROR invalid instruction
+    // not sure how we wanna deal with this
 
   }
 
