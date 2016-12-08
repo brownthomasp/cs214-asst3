@@ -1,8 +1,13 @@
 #include <stdio.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <fcntl.h>
 #include <errno.h>
-//#include <netdb.h> //Supposedly defines "HOST_NOT_FOUND"
+#include <netdb.h> //Supposedly defines "HOST_NOT_FOUND"
+#include <string.h>
+#include <strings.h>
 
 // this struct is to format signals from and to the client
 typedef struct pack {
@@ -14,10 +19,10 @@ typedef struct pack {
 } pack;
 
 int socket_descriptor = -1;
-int curr_fildes = 0;
-void *send_buffer[sizeof(pack)];
-void *receive_buffer[sizeof(pack)];
-struct sockkaddr_in remote_server = NULL;
+//int curr_fildes = 0;
+void *send_buffer; //malloc(sizeof(pack));
+void *receive_buffer; // malloc(sizeof(pack));
+struct sockaddr_in remote_server;
 struct hostent *remote_ip = NULL;
 
 //Connet to remote server specified by hostname.
@@ -32,9 +37,9 @@ int netserverinit(char * hostname) {
 
   socket_descriptor = socket(AF_INET, SOCK_STREAM, 0);
 
-  remoteServer.sin_family = AF_INET;
-  bcopy((char *)remote_ip->h_addr, (char *)remoteServer.sin_addr.s_addr, remote_ip->h_length);
-  remoteServer.sin_port = htons(9999);
+  remote_server.sin_family = AF_INET;
+  bcopy((char *)remote_ip->h_addr, (char *)remote_server.sin_addr.s_addr, remote_ip->h_length);
+  remote_server.sin_port = htons(9999);
 
   //If connection failed, report IO error.
   if (connect (socket_descriptor, (struct sockaddr *)&remote_server, sizeof(remote_server)) < 0) {
@@ -55,10 +60,13 @@ int netopen(const char * pathname, int flags) {
     return -1;
   }
 
+  send_buffer = malloc(sizeof(pack));
+  receive_buffer = malloc(sizeof(pack));
+
   pack *client_message = send_buffer;
   pack *server_message = receive_buffer;
   
-  client_message->file_name = pathname;
+  strcpy(client_message->file_name, pathname);
   client_message->access_mode = flags;
   client_message->op_code = 0;
 
@@ -70,18 +78,25 @@ int netopen(const char * pathname, int flags) {
     return -1;
   }
 
-  curr_fildes = server_message->size;
-  return 0;
+  free(send_buffer);
+  send_buffer = NULL;
+  free(receive_buffer);
+  receive_buffer = NULL;
+
+  return  server_message->size;
 }
 
 
 //Read nbyte bytes into buf from remote fd
-size_t netread(int fd, const void * buf, size_t nbyte) {
+size_t netread(int fd, void * buf, size_t nbyte) {
   //No socket descriptor == no connection
   if (socket_descriptor == -1) {
     h_errno = HOST_NOT_FOUND;
     return -1;
   }
+
+  send_buffer = malloc(sizeof(pack));
+  receive_buffer = malloc(sizeof(pack));
 
   pack *client_message = send_buffer;
   pack *server_message = receive_buffer;
@@ -102,6 +117,11 @@ size_t netread(int fd, const void * buf, size_t nbyte) {
 
   read(socket_descriptor, buf, server_message->size);
 
+  free(send_buffer);
+  send_buffer = NULL;
+  free(receive_buffer);
+  receive_buffer = NULL;
+
   return server_message->size;
 }
 
@@ -113,6 +133,9 @@ size_t netwrite(int fd, const void * buf, size_t nbyte) {
     h_errno = HOST_NOT_FOUND;
     return -1;
   }
+
+  send_buffer = malloc(sizeof(pack));
+  receive_buffer = malloc(sizeof(pack));
 
   pack *client_message = send_buffer;
   pack *server_message = receive_buffer;
@@ -132,6 +155,11 @@ size_t netwrite(int fd, const void * buf, size_t nbyte) {
 	return -1;
   }
 
+  free(send_buffer);
+  send_buffer = NULL;
+  free(receive_buffer);
+  receive_buffer = NULL;
+
   return server_message->size;
 }
 
@@ -142,6 +170,9 @@ int netclose(int fd) {
     h_errno = HOST_NOT_FOUND;
     return -1;
   }
+
+  send_buffer = malloc(sizeof(pack));
+  receive_buffer = malloc(sizeof(pack));
 
   pack *client_message = send_buffer;
   pack *server_message = receive_buffer;
@@ -155,6 +186,11 @@ int netclose(int fd) {
     errno = server_message->op_code;
     return -1;
   }
+
+  free(send_buffer);
+  send_buffer = NULL;
+  free(receive_buffer);
+  receive_buffer = NULL;
 
   return 0;
 }
