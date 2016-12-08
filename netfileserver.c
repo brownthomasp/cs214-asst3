@@ -6,7 +6,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
-
+#include <error.h>
+#include <errno.h>
 
 // this struct is to format signals from and to the client
 typedef struct pack {
@@ -16,7 +17,6 @@ typedef struct pack {
   int fp;
   int size;
 } pack;
-
 
 // this struct is for a binary tree that will store the names of files that
 // have been opened as well as a file desciptor, mutex lock, condition variable and 
@@ -30,7 +30,6 @@ typedef struct node {
   int IP;
   pthread_cond_t cond;
 } node;
-
 
 // this function initializes a new node and returns a pointer to it
 static node * new_node(node * left, node * right, char * file_name) {
@@ -76,7 +75,7 @@ static node * search_fp(node * root, int fp) {
 static void clean_tree(node * root) {
   if (!root) { return; }
   if (root->left) { clean_tree(root->left); }
-  if (root->right) { clean_troe(root->right); }
+  if (root->right) { clean_tree(root->right); }
   pthread_mutex_destroy(&(root->lock));
   pthread_cond_destroy(&(root->cond));
   free(root->file_name);
@@ -101,7 +100,7 @@ static pthread_cond_t count_cond = PTHREAD_COND_INITIALIZER;
 void * handle_connection(void * arg) {
 
   connection * con = (connection *)arg;
-  int files_open = 0;
+  //int files_open = 0;
 
   // receive request from client
   void * buffer = malloc(sizeof(pack));
@@ -218,11 +217,12 @@ void * handle_connection(void * arg) {
 
     break;
     
+  //Default case: operation not permitted, return -1
   default :
-
-    // ERROR invalid instruction
-    // not sure how we wanna deal with this
-
+    errno = EPERM;
+    input->size = -1;
+    input->op_code = errno;
+    write(con->sd, input, sizeof(pack));
   }
 
   // free buffer and close connection
@@ -273,7 +273,7 @@ int main(int argc, char ** argv) {
 
   //Get address info of client as well size of the struct.
   struct sockaddr_in client;
-  int client_size = sizeof(struct sockaddr_in);
+  socklen_t client_size = sizeof(struct sockaddr_in);
 
   //Attempt to listen for incoming connections.
   //According to manpage of listen, this can fail if:
@@ -307,7 +307,7 @@ int main(int argc, char ** argv) {
 	if (connections_count == 100) {
 	  pthread_cond_wait(&count_cond, &count_wait);
 	}
-	pthread_unlock(&count_lock);
+	pthread_mutex_unlock(&count_lock);
 	i = 0;
       }
     }
@@ -343,6 +343,8 @@ int main(int argc, char ** argv) {
     }
 	
   }
+
+  clean_tree(root);
 
   return 0;
 }
