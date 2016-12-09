@@ -353,6 +353,11 @@ void * handle_connection(void * arg) {
     write(con->sd, input, sizeof(pack));
 
     break;
+
+  case 4:  // this is for when a client initiallizes their connection to the server
+    add_client(client_tree, con->IP, input->access_mode);
+
+    break;
     
   //Default case: operation not permitted, return -1
   default :
