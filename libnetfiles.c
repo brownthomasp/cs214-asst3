@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <netdb.h> //Supposedly defines "HOST_NOT_FOUND"
+#include <netdb.h>
 #include <string.h>
 #include <strings.h>
 
@@ -19,14 +19,14 @@ typedef struct pack {
 } pack;
 
 int socket_descriptor = -1;
-//int curr_fildes = 0;
-void *send_buffer; //malloc(sizeof(pack));
-void *receive_buffer; // malloc(sizeof(pack));
+int g_filemode = -1; //should not be set unless netserverinit is called. G for global.
+void *send_buffer;
+void *receive_buffer;
 struct sockaddr_in remote_server;
 struct hostent *remote_ip = NULL;
 
 //Connet to remote server specified by hostname.
-int netserverinit(char * hostname) {
+int netserverinit(char * hostname, int filemode) {
   remote_ip = gethostbyname(hostname);
 
   //Host not found.
@@ -48,6 +48,16 @@ int netserverinit(char * hostname) {
     return -1;
   }
 
+  send_buffer = malloc(sizeof(pack));
+  pack *access_message = send_buffer;
+  access_message->access_mode = filemode;
+  write(socket_descriptor, access_message, sizeof(pack));
+
+  free(send_buffer);
+  send_buffer = NULL:
+
+  g_filemode = filemode;
+
   return 0;
 }
 
@@ -57,6 +67,13 @@ int netopen(const char * pathname, int flags) {
   //If no valid socket descriptor, there is no valid connection.
   if (socket_descriptor == -1) {
     h_errno = HOST_NOT_FOUND;
+    return -1;
+  }
+
+  //If connection failed, report IO error.
+  if (connect (socket_descriptor, (struct sockaddr *)&remote_server, sizeof(remote_server)) < 0) {
+    fprintf(stderr, "ERROR: could not connect to remote server.\n");
+    errno = EIO;
     return -1;
   }
 
@@ -88,10 +105,17 @@ int netopen(const char * pathname, int flags) {
 
 
 //Read nbyte bytes into buf from remote fd
-size_t netread(int fd, void * buf, size_t nbyte) {
+ssize_t netread(int fd, void * buf, size_t nbyte) {
   //No socket descriptor == no connection
   if (socket_descriptor == -1) {
     h_errno = HOST_NOT_FOUND;
+    return -1;
+  }
+
+  //If connection failed, report IO error.
+  if (connect (socket_descriptor, (struct sockaddr *)&remote_server, sizeof(remote_server)) < 0) {
+    fprintf(stderr, "ERROR: could not connect to remote server.\n");
+    errno = EIO;
     return -1;
   }
 
@@ -127,10 +151,17 @@ size_t netread(int fd, void * buf, size_t nbyte) {
 
 
 //Write nbyte bytes from buf into remote fd
-size_t netwrite(int fd, const void * buf, size_t nbyte) {
+ssize_t netwrite(int fd, const void * buf, size_t nbyte) {
   //No socket no conn
   if (socket_descriptor == -1) {
     h_errno = HOST_NOT_FOUND;
+    return -1;
+  }
+
+  //If connection failed, report IO error.
+  if (connect (socket_descriptor, (struct sockaddr *)&remote_server, sizeof(remote_server)) < 0) {
+    fprintf(stderr, "ERROR: could not connect to remote server.\n");
+    errno = EIO;
     return -1;
   }
 
@@ -168,6 +199,13 @@ int netclose(int fd) {
   //You get the drill by this point
   if (socket_descriptor == -1) {
     h_errno = HOST_NOT_FOUND;
+    return -1;
+  }
+
+  //If connection failed, report IO error.
+  if (connect (socket_descriptor, (struct sockaddr *)&remote_server, sizeof(remote_server)) < 0) {
+    fprintf(stderr, "ERROR: could not connect to remote server.\n");
+    errno = EIO;
     return -1;
   }
 

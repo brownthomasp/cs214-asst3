@@ -9,7 +9,13 @@
 #include <error.h>
 #include <errno.h>
 
-// this struct is to format signals from and to the client
+//Eliminates compile-time error regarding an fnode* being a member of linknode
+//and a linknode* being a member of fnode. (Would say that linknode is undefined)
+//Ideally all this should be in an .h file but its not in the project spec so yolo
+struct fnode;
+struct linknode;
+
+//This struct is to format signals from and to the client
 typedef struct pack {
   char file_name[128];
   int access_mode;
@@ -18,22 +24,35 @@ typedef struct pack {
   int size;
 } pack;
 
-
-// this struct is a node for two binar trees, one will contain the clients with their connection permission
+// This struct is a node for two binary trees, one will contain the clients with their connection permission
 // and a list of the file descriptors they have open, the other will contain the files that have been opened 
 // with a list of the file descriptors open for that file
 typedef struct fnode {
-  struct node * left;
-  struct node * right;
+  struct fnode * left;
+  struct fnode * right;
   char * file_name;
-  link * list;
+  struct linknode * list;
   long IP;
   int perm;
   pthread_mutex_t lock;
 } node;
 
+//This struct is for the linknode lists that will be in both trees
+typedef struct linknode {
+  struct linknode * next;
+  int con_mode;  // connection mode of the client who owns this descriptor
+  int access_mode;  // access_mode of the file descriptor
+  int fd;    // the file descriptor
+  node * file_node;  // pointer to the assosicated node in the file tree
+} linknode;
 
-// this function initializes a new node and returns a pointer to it
+//Relates a socket descriptor to IP
+typedef struct connection {
+  int sd; // socket descriptor
+  long IP; // IP of client
+} connection;
+
+//This function initializes a new node and returns a pointer to it
 static node * new_node(node * left, node * right, char * file_name, long IP, int mode) {
   node * new = malloc(sizeof(node));
   new->left = left;
@@ -50,9 +69,8 @@ static node * new_node(node * left, node * right, char * file_name, long IP, int
   return new;
 }
 
-
-// this function will search the file tree for the requested file and return the 
-// assosicated node, creating the node if it doesn't already exist
+// This function will search the file tree for the requested file and return the 
+// associated node, creating the node if it doesn't already exist
 static node * get_file(node * root, char * file_name) {
   if (!root) {
     root = new_node(NULL, NULL, file_name, 0, 0);
@@ -65,11 +83,11 @@ static node * get_file(node * root, char * file_name) {
 
 }
 
-// this function will search the client tree for a given address and return the 
+// This function will search the client tree for a given address and return the 
 // associated node, this will be NULL if the node does not exist
 static node * get_client(node * root, long IP) {
   if (!root) {
-    return root;
+    return NULL;
   }
 
   if (root->IP == IP) { return root; }
@@ -78,46 +96,33 @@ static node * get_client(node * root, long IP) {
 
 }
 
-// this function is for adding a client to the client tree, if the client already 
+// This function is for adding a client to the client tree, if the client already 
 // exists, it will update their permission mode
-static void * add_client(node * root, long IP, int mode) {
+static node * add_client(node * root, long IP, int mode) {
   if (!root) {
-    root = new_node(NULL, NULL, NULL, IP, mode);
-    return;
+    return new_node(NULL, NULL, NULL, IP, mode);
   }
 
-  if (root->IP == IP) { root->perm = mode; return; }
+  if (root->IP == IP) { root->perm = mode; return root; }
   else if (root->IP < IP) { return get_client(root->left, IP); }
   return get_client(root->right, IP);
-
 }
 
-
-// this function cleans the tree
+// This function cleans the tree
 static void clean_tree(node * root) {
   if (!root) { return; }
   if (root->left) { clean_tree(root->left); }
   if (root->right) { clean_tree(root->right); }
   pthread_mutex_destroy(&(root->lock));
-  pthread_cond_destroy(&(root->cond));
+ // pthread_cond_destroy(&(root->cond)); which condition were we talking about?
   free(root->file_name);
   free(root);
 }
 
 
-// this struct is for the link lists that will be in both trees
-typedef sturct link {
-  struct link * next;
-  int con_mode;  // connection mode of the client who owns this discriptor
-  int access_mode;  // access_mode of the file descriptor
-  int fd;    // the file descriptor
-  node * file_node;  // pointer to the assosicated node in the file tree
-} link;
-
-
-// this function allocates and returns a pointer to a new link
-static link * new_link(int fd, int con_mode, int access_mode, void * file_node) {
-  link * new = malloc(sizeof(link));
+// This function allocates and returns a pointer to a new linknode
+static linknode * new_linknode(int fd, int con_mode, int access_mode, void * file_node) {
+  linknode * new = malloc(sizeof(linknode));
   
   new->next = NULL;
   new->fd = fd;
@@ -128,10 +133,10 @@ static link * new_link(int fd, int con_mode, int access_mode, void * file_node) 
   return new;
 }
 
-// this functin finds and removes the link for a given file descriptor from a given list
-static void remove_link(list * root, int fd) {
-  list * ptr = root;
-  pist * prv = NULL;;
+// This functin finds and removes the linknode for a given file descriptor from a given list
+static void remove_linknode(linknode * root, int fd) {
+  linknode * ptr = root;
+  linknode * prv = NULL;
   
   while (ptr) {
     if (ptr->fd == fd) {
@@ -148,12 +153,35 @@ static void remove_link(list * root, int fd) {
   }
 }
 
+static void print_list(linknode *head) {
+  if (!head) return;
+
+  printf("\tlinknode node @ %p\n", head);
+  printf("\t\tcon mode = %d\n", head->con_mode);
+  printf("\t\taccess mode = %d\n", head->access_mode);
+  printf("\t\tfd = %d\n", head->fd);
+  printf("\t\tassoc file node @ %p\n", head->file_node);
+
+  print_list(head->next);
+}
+
+static void print_btree(node *root) {
+  if (!root) return;
+
+  print_btree(root->left);
+  printf("Btree node @ %p\n", root);
+  printf("\tleft child @ %p\n", root->left);
+  printf("\tright child @ %p\n", root->right);
+  printf("\tfname = %s\n", root->file_name);
+  print_list(root->list);
+  printf("\tip = %ld\n", root->IP);
+  printf("\tperm = %d (0 unrestricted, 1 exclusive, 2 transaction)\n", root->perm);
+}
+/////
 
 
-typedef struct connection {
-  int sd; // socket descriptor
-  long IP; // IP of client
-} connection;
+
+
 
 static connection connections[100];
 
@@ -178,7 +206,7 @@ void * handle_connection(void * arg) {
   pack * input;
   node * f_node;
   node * c_node;
-  link * ptr;
+  linknode * ptr;
   int valid = 1;
 
   read(con->sd, buffer, sizeof(pack));
@@ -188,7 +216,7 @@ void * handle_connection(void * arg) {
   c_node = get_client(client_tree, con->IP);
   pthread_mutex_unlock(&c_lock);
 
-  if (!client_node) {
+  if (!c_node) {
     // client has not run serverinit, has not established access mode
     input->op_code = -1; // force the switch to default
   } else {
@@ -200,7 +228,7 @@ void * handle_connection(void * arg) {
   case 0 : // open file
     // search the file tree for the given file and obtain the associated node
     pthread_mutex_lock(&f_lock);
-    node = get_node(root, input->file_name);
+    f_node = get_file(file_tree, input->file_name);
     pthread_mutex_unlock(&f_lock);
 
     // obtain the lock for the file node
@@ -229,33 +257,36 @@ void * handle_connection(void * arg) {
 	    (ptr->access_mode == O_WRONLY || ptr->access_mode == O_RDWR)) { valid = 0; break; }
 	ptr = ptr->next;
       }
+
       break;
 
     case 2:
       if (!f_node->list) { valid = 0; }
+    
       break;
 
     default:
       valid = 0;
-
+      
+      break;
     }
 
-    while (ptr) {
+    while (ptr->next) {
       ptr = ptr->next;
     }
 
     if (valid) {
       // if the client can access the file, open a new file descriptor
-      input->size = open(input->file_name, input->access_mode);
+      input->size = open(input->file_name, input->access_mode | O_APPEND);
       // if the open was successful, add the new file descriptor to the lists
       // in the client and file nodes
       if (input->size != -1) {
-	ptr = new_link(input->size, c_node->perm, input->access_mode, NULL);
+	ptr->next = new_linknode(input->size, c_node->perm, input->access_mode, NULL);
 	ptr = c_node->list;
-	while (ptr) {
+	while (ptr->next) {
 	  ptr = ptr->next; 
 	}
-	ptr = new_link(input->size, 0, 0, f_node);
+	ptr->next = new_linknode(input->size, 0, 0, f_node);
       }
     } else {
       input->size = -1;
@@ -284,6 +315,7 @@ void * handle_connection(void * arg) {
       errno = EPERM; // macro for "operation not permitted"
     } else {
       buffer = malloc(input->size);
+      lseek(ptr->fd, 0, SEEK_SET); //for every read, reset to 0
       input->size = read(ptr->fd, buffer, input->size);
     }
     
@@ -302,7 +334,7 @@ void * handle_connection(void * arg) {
     // find the given file descriptor
     ptr = c_node->list;
     while (ptr) {
-      if (ptr->fd == fd) { break; }
+      if (ptr->fd == input->fd) { break; }
       ptr = ptr->next;
     }
 
@@ -328,7 +360,7 @@ void * handle_connection(void * arg) {
     // find the given file descriptor
     ptr = c_node->list;
     while (ptr) {
-      if (ptr->fd == fd) { break; }
+      if (ptr->fd == input->fd) { break; }
       ptr = ptr->next;
     }
     if (!ptr) {
@@ -340,10 +372,10 @@ void * handle_connection(void * arg) {
       // if successful, clean up
       if (input->size != -1) {
 	pthread_mutex_lock(&(ptr->file_node->lock));
-	remove_link(ptr->file_node->list, input->fd);
+	remove_linknode(ptr->file_node->list, input->fd);
 	pthread_mutex_lock(&(ptr->file_node->lock));
 	
-	remove_link(c_node->list, input->fd);
+	remove_linknode(c_node->list, input->fd);
       }
     }
 
@@ -355,7 +387,7 @@ void * handle_connection(void * arg) {
     break;
 
   case 4:  // this is for when a client initiallizes their connection to the server
-    add_client(client_tree, con->IP, input->access_mode);
+   client_tree = add_client(client_tree, con->IP, input->access_mode);
 
     break;
     
@@ -387,7 +419,7 @@ void * handle_connection(void * arg) {
 
 int main(int argc, char ** argv) {
 
-	//Set up socket for IPv4 (TCP/IP) connections.
+  //Set up socket for IPv4 (TCP/IP) connections.
   int socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_desc == -1) {
     fprintf(stderr, "ERROR: failed to acquire socket for incoming connections.\n");
@@ -438,7 +470,7 @@ int main(int argc, char ** argv) {
     int searching_for_available_connection = 1;
     while (searching_for_available_connection) { 
       //When a thread finishes, it sets its connection->sd to -1, so we know if a slot is avaialble.
-      if (connectors[i].sd == -1) {
+      if (connections[i].sd == -1) {
         break;
       }
       
@@ -448,8 +480,8 @@ int main(int argc, char ** argv) {
       // wait for a slot to be freed if there are none
       if (i == 100) {
 	pthread_mutex_lock(&count_lock);
-	if (connections_count == 100) {
-	  pthread_cond_wait(&count_cond, &count_wait);
+	if (connection_count == 100) {
+	  pthread_cond_wait(&count_cond, &count_lock);
 	}
 	pthread_mutex_unlock(&count_lock);
 	i = 0;
@@ -480,15 +512,13 @@ int main(int argc, char ** argv) {
     }
 
     if (connections[i].sd > -1) {
-      //Incrament the connection counter if there are no failures
+      //Increment the connection counter if there are no failures
       pthread_mutex_lock(&count_lock);
       connection_count++;
       pthread_mutex_unlock(&count_lock);
     }
 	
   }
-
-  clean_tree(root);
 
   return 0;
 }
