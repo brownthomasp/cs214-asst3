@@ -103,9 +103,11 @@ static node * add_client(node * root, long IP, int mode) {
     return new_node(NULL, NULL, NULL, IP, mode);
   }
 
-  if (root->IP == IP) { root->perm = mode; return root; }
-  else if (root->IP < IP) { return get_client(root->left, IP); }
-  return get_client(root->right, IP);
+  if (root->IP == IP) { root->perm = mode; }
+  else if (root->IP < IP) { root->left = add_client(root->left, IP, mode); }
+  root->right = add_client(root->right, IP, mode);
+
+  return root;
 }
 
 // This function cleans the tree
@@ -543,7 +545,7 @@ int main(int argc, char ** argv) {
     while (searching_for_available_connection) { 
       //When a thread finishes, it sets its connection->sd to -1, so we know if a slot is avaialble.
       if (connections[i].sd == -1) {
-        printf("First available connection is in slot %d.\n", i);
+       // printf("First available connection is in slot %d.\n", i);
         break;
       }
       
@@ -568,7 +570,7 @@ int main(int argc, char ** argv) {
       }
     }
 
-    printf("Trying to accept connection at slot %d:\n", i);
+    // printf("Trying to accept connection at slot %d:\n", i);
     //Try to accept the incoming connection in this "slot".
     //On failure, skip it and go back to looking for available slots.
     connections[i].sd = accept(socket_desc, (struct sockaddr *)&client, &client_size);
@@ -585,12 +587,12 @@ int main(int argc, char ** argv) {
       fprintf(stderr, "ERROR: failed to create thread for client connection.\n");
       connections[i].sd = -1;
 	  continue;
-    } else printf("Successfully created thread to handle new connection.\n");
+    } //else printf("Successfully created thread to handle new connection.\n");
 	
     //Detach thread.
     if (pthread_detach(threads[i])) {
       fprintf(stderr, "ERROR: could not detach a worker thread.\n");
-    } else printf("Successfully detached the thread.\n");
+    } //else printf("Successfully detached the thread.\n");
 
     if (connections[i].sd > -1) {
       //Increment the connection counter if there are no failures
