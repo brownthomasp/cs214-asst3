@@ -133,24 +133,58 @@ static linknode * new_linknode(int fd, int con_mode, int access_mode, void * fil
   return new;
 }
 
+static void print_single_linknode(linknode *head) {
+  if (!head) return;
+
+  printf("\tlinknode node @ %p\n", head);
+  printf("\t\tcon mode = %d\n", head->con_mode);
+  printf("\t\taccess mode = %d\n", head->access_mode);
+  printf("\t\tfd = %d\n", head->fd);
+  printf("\t\tassoc file node @ %p\n", head->file_node);
+}
+
 // This functin finds and removes the linknode for a given file descriptor from a given list
 static void remove_linknode(linknode * root, int fd) {
   linknode * ptr = root;
   linknode * prv = NULL;
-  
+ 
+  printf("trying to remove node with fd = %d\n", fd);
+ 
   while (ptr) {
+    printf("current node is:\n");
+    print_single_linknode(ptr);
+    
     if (ptr->fd == fd) {
       if (prv) {
 	prv->next = ptr->next;
 	free(ptr);
+        break;
       } else { 
 	free(ptr);
-	root = NULL; 
+	root = NULL;
+        break; 
       }
     }
+
+    prv = ptr; 
     ptr = ptr->next;
-    prv = ptr;
+   
   }
+}
+
+static linknode * add_to_end(linknode *head, linknode *new) {
+  if(!head) return new;
+  
+  linknode *ptr = head, *prev = NULL;  
+
+  while(ptr) {
+    prev = ptr;
+    ptr = ptr->next;
+  }
+
+  prev->next = new;
+
+  return head;
 }
 
 static void print_list(linknode *head) {
@@ -169,6 +203,22 @@ static void print_btree(node *root) {
   if (!root) return;
 
   print_btree(root->left);
+  printf("Btree node @ %p\n", root);
+  printf("\tleft child @ %p\n", root->left);
+  printf("\tright child @ %p\n", root->right);
+  printf("\tfname = %s\n", root->file_name);
+  print_list(root->list);
+  printf("\tip = %ld\n", root->IP);
+  printf("\tperm = %d (0 unrestricted, 1 exclusive, 2 transaction)\n", root->perm);
+  print_btree(root->left);
+}
+
+static void print_btree_singlenode(node *root) {
+  if(!root) {
+    printf("Node is null --> this client has not yet connected\n");
+    return;
+  }
+
   printf("Btree node @ %p\n", root);
   printf("\tleft child @ %p\n", root->left);
   printf("\tright child @ %p\n", root->right);
@@ -216,9 +266,13 @@ void * handle_connection(void * arg) {
   c_node = get_client(client_tree, con->IP);
   pthread_mutex_unlock(&c_lock);
 
+  printf("Printing client node:\n");
+  print_btree_singlenode(c_node);
+
   if (!c_node) {
     // client has not run serverinit, has not established access mode
-    input->op_code = -1; // force the switch to default
+    printf("Client did not run netserverinit no bueno\n");
+    if(input->op_code != 4) input->op_code = -1; // force the switch to default
   } else {
     // obtain the lock for the client node
     pthread_mutex_lock(&(c_node->lock));
@@ -227,9 +281,13 @@ void * handle_connection(void * arg) {
   switch (input->op_code) {
   case 0 : // open file
     // search the file tree for the given file and obtain the associated node
+    printf("Got open command.\n");
     pthread_mutex_lock(&f_lock);
     f_node = get_file(file_tree, input->file_name);
     pthread_mutex_unlock(&f_lock);
+
+    printf("Printing file node:\n");
+    print_btree_singlenode(f_node);
 
     // obtain the lock for the file node
     pthread_mutex_lock(&(f_node->lock));
@@ -271,9 +329,9 @@ void * handle_connection(void * arg) {
       break;
     }
 
-    while (ptr->next) {
-      ptr = ptr->next;
-    }
+  //  while (ptr->next) {
+  //   ptr = ptr->next;
+  //  }
 
     if (valid) {
       // if the client can access the file, open a new file descriptor
@@ -281,12 +339,12 @@ void * handle_connection(void * arg) {
       // if the open was successful, add the new file descriptor to the lists
       // in the client and file nodes
       if (input->size != -1) {
-	ptr->next = new_linknode(input->size, c_node->perm, input->access_mode, NULL);
-	ptr = c_node->list;
-	while (ptr->next) {
-	  ptr = ptr->next; 
-	}
-	ptr->next = new_linknode(input->size, 0, 0, f_node);
+	f_node->list = add_to_end(f_node->list, new_linknode(input->size, c_node->perm, input->access_mode, NULL));
+//	ptr = c_node->list;
+//	while (ptr->next) {
+//	  ptr = ptr->next; 
+//	}
+	c_node->list = add_to_end(c_node->list, new_linknode(input->size, 0, 0, f_node));
       }
     } else {
       input->size = -1;
@@ -302,7 +360,7 @@ void * handle_connection(void * arg) {
     break;
 
   case 1: // read from file
-    
+    printf("Got read command.\n");
     // find the desired file descriptor
     ptr = c_node->list;
     while (ptr) {
@@ -356,25 +414,32 @@ void * handle_connection(void * arg) {
     break;
 
   case 3: // close file descriptor
- 
+    printf("Got close command.\n");
     // find the given file descriptor
     ptr = c_node->list;
+    
+    printf("Searching for given file.\n");
     while (ptr) {
       if (ptr->fd == input->fd) { break; }
       ptr = ptr->next;
     }
     if (!ptr) {
       // ERROR client did not open this file descriptor
+      printf("This client did not open this fildes.\n");
       errno = EPERM;
     } else {
+      printf("Trying to close fd...\n");
       // close the file descriptor
       input->size = close(ptr->fd);
+      printf("Closed.\n");
       // if successful, clean up
       if (input->size != -1) {
 	pthread_mutex_lock(&(ptr->file_node->lock));
-	remove_linknode(ptr->file_node->list, input->fd);
-	pthread_mutex_lock(&(ptr->file_node->lock));
+	printf("Doing weird removal A\n");
+        remove_linknode(ptr->file_node->list, input->fd);
+	pthread_mutex_unlock(&(ptr->file_node->lock));
 	
+        printf("Doing weird removal B\n");
 	remove_linknode(c_node->list, input->fd);
       }
     }
@@ -387,30 +452,37 @@ void * handle_connection(void * arg) {
     break;
 
   case 4:  // this is for when a client initiallizes their connection to the server
+   printf("Got init command.\n");
    client_tree = add_client(client_tree, con->IP, input->access_mode);
+   printf("Added client to client list.\n");
 
-    break;
+   break;
     
   //Default case: operation not permitted, return -1
-  default :
+  default:
+    printf("Client did not send an opcode, or opcode was not recognized.\n");
     errno = EPERM;
     input->size = -1;
     input->op_code = errno;
     write(con->sd, input, sizeof(pack));
   }
 
-  pthread_mutex_unlock(&(c_node->lock));
+  if (c_node != NULL) pthread_mutex_unlock(&(c_node->lock));
 
   // free buffer and close connection
   free(buffer);
   close(con->sd);
   con->sd = -1;
 
+  printf("Closed local command buffer for this client.\n");
+
   // decrament the connection count and signal
   pthread_mutex_lock(&count_lock);
   connection_count--;
   pthread_cond_signal(&count_cond);
   pthread_mutex_unlock(&count_lock);
+
+  printf("Signaled that this command has completed.\n");
 
   return 0;
 
@@ -424,7 +496,7 @@ int main(int argc, char ** argv) {
   if (socket_desc == -1) {
     fprintf(stderr, "ERROR: failed to acquire socket for incoming connections.\n");
     return -1;
-  }
+  } else printf("Successfully acquired socket.\n");
 
   //Get IPv4 address such that incoming connections will come to <address>:9999
   struct sockaddr_in server;
@@ -436,7 +508,7 @@ int main(int argc, char ** argv) {
   if (bind(socket_desc, (struct sockaddr *)&server, sizeof(server)) < 0) {
     fprintf(stderr, "ERROR: failed to bind address to socket.\n");
     return -2;
-  }
+  } else printf("Successfully bound address to socket.\n");
 
   //Store child/worker threads (one per connection).
   pthread_t threads[100];
@@ -458,19 +530,20 @@ int main(int argc, char ** argv) {
   if (listen(socket_desc, 5) < 0) {
     fprintf(stderr, "ERROR: cannot listen for connections on specified socket.\n");
 	return -3;
-  }
+  } else printf("Listening for connections...\n\n");
   
   //Changed this and nested while loop to use a descriptive name of what they do.
   //I am acknowledging that while(1) is functionally just as good.
   int accepting_new_connections = 1;
+  int searching_for_available_connection = 1;
   while (accepting_new_connections) {
     //Spool over available connection "slots" and see if we can find an open one.
     //If there exists some sd such that sd = 0, that connection "slot" is available.
     i = 0;
-    int searching_for_available_connection = 1;
     while (searching_for_available_connection) { 
       //When a thread finishes, it sets its connection->sd to -1, so we know if a slot is avaialble.
       if (connections[i].sd == -1) {
+        printf("First available connection is in slot %d.\n", i);
         break;
       }
       
@@ -478,23 +551,31 @@ int main(int argc, char ** argv) {
       
       // on failure to find a free connection slot check the connection count and 
       // wait for a slot to be freed if there are none
-      if (i == 100) {
-	pthread_mutex_lock(&count_lock);
-	if (connection_count == 100) {
+      if (i >= 100) {
+        printf("Could not find an open slot. Waiting on a slot to open up.\n");
+	
+        pthread_mutex_lock(&count_lock);
+	
+        if (connection_count == 100) {
 	  pthread_cond_wait(&count_cond, &count_lock);
 	}
-	pthread_mutex_unlock(&count_lock);
+        
+        printf("A slot opened. Finding available connection...\n");
+	
+        pthread_mutex_unlock(&count_lock);
 	i = 0;
+        break;
       }
     }
 
+    printf("Trying to accept connection at slot %d:\n", i);
     //Try to accept the incoming connection in this "slot".
     //On failure, skip it and go back to looking for available slots.
     connections[i].sd = accept(socket_desc, (struct sockaddr *)&client, &client_size);
     if (connections[i].sd < 0) {
       fprintf(stderr, "ERROR: failed to accept incoming connection.\n");
         continue;
-    }
+    } else printf("Successfully accepted new connection in slot %d.\n", i);
 
     //Record the address of the connection
     connections[i].IP = client.sin_addr.s_addr;
@@ -504,12 +585,12 @@ int main(int argc, char ** argv) {
       fprintf(stderr, "ERROR: failed to create thread for client connection.\n");
       connections[i].sd = -1;
 	  continue;
-    }
+    } else printf("Successfully created thread to handle new connection.\n");
 	
     //Detach thread.
     if (pthread_detach(threads[i])) {
       fprintf(stderr, "ERROR: could not detach a worker thread.\n");
-    }
+    } else printf("Successfully detached the thread.\n");
 
     if (connections[i].sd > -1) {
       //Increment the connection counter if there are no failures
