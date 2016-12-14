@@ -337,7 +337,7 @@ void * handle_connection(void * arg) {
 
     if (valid) {
       // if the client can access the file, open a new file descriptor
-      input->size = open(input->file_name, input->access_mode | O_APPEND);
+      input->size = open(input->file_name, input->access_mode | O_APPEND | O_CREAT);
       // if the open was successful, add the new file descriptor to the lists
       // in the client and file nodes
       if (input->size != -1) {
