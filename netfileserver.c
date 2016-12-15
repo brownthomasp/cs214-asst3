@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <error.h>
 #include <errno.h>
+#include <sys/time.h>
 
 //Eliminates compile-time error regarding an fnode* being a member of linknode
 //and a linknode* being a member of fnode. (Would say that linknode is undefined)
@@ -24,6 +25,11 @@ typedef struct pack {
   int size;
 } pack;
 
+typedef struct qnode {
+  pthread_cond_t *cond;
+  struct qnode *next;
+} qnode;
+
 // This struct is a node for two binary trees, one will contain the clients with their connection permission
 // and a list of the file descriptors they have open, the other will contain the files that have been opened 
 // with a list of the file descriptors open for that file
@@ -35,6 +41,9 @@ typedef struct fnode {
   long IP;
   int perm;
   pthread_mutex_t lock;
+  pthread_cond_t cond;
+  struct qnode *front;
+  struct qnode* rear;
 } node;
 
 //This struct is for the linknode lists that will be in both trees
@@ -52,6 +61,61 @@ typedef struct connection {
   long IP; // IP of client
 } connection;
 
+static void enqueue(node *file, pthread_cond_t *cond) {
+  qnode *temp = malloc(sizeof(qnode));
+  temp->cond = cond;
+  temp->next = NULL;
+  if(file->front == NULL && file->rear == NULL) {
+    file->front = file->rear = temp;
+    return;
+  }
+  file->rear->next = temp;
+  file->rear = temp;
+}
+
+static void dequeue(node *file) {
+  qnode *temp = file->front;
+  if(file->front == NULL) {
+    return;
+  }
+  if(file->front == file->rear) {
+    file->front = file->rear = NULL;
+  }
+  else {
+    file->front = file->front->next;
+  }
+  free(temp);
+}
+
+static pthread_cond_t *get_next(node *file) {
+  if(file->front == NULL) {
+    return 0;
+  }
+  return file->front->cond;
+}
+
+static void remove_qnode(node *file, pthread_cond_t *cond) {
+  qnode *prv = NULL;
+  qnode *ptr = file->front;
+  while(ptr) {
+    if(ptr->cond == cond) {
+      if (ptr == file->front) {
+        file->front = file->front->next;
+      }
+      if (ptr == file->rear) {
+        file->rear = prv;
+      }
+      if (ptr != file->front && ptr != file->rear) {
+        prv->next = ptr->next;
+      }
+      free(ptr);
+      break;
+    }
+    prv = ptr;
+    ptr = ptr->next;
+  }
+}
+
 //This function initializes a new node and returns a pointer to it
 static node * new_node(node * left, node * right, char * file_name, long IP, int mode) {
   node * new = malloc(sizeof(node));
@@ -65,6 +129,8 @@ static node * new_node(node * left, node * right, char * file_name, long IP, int
   new->IP = IP;
   new->perm = mode;
   new->list = NULL;
+  new->front = NULL;
+  new->rear = NULL;
   
   return new;
 }
@@ -259,7 +325,14 @@ void * handle_connection(void * arg) {
   node * f_node;
   node * c_node;
   linknode * ptr;
+  int waiting = 1;
   int valid = 1;
+  int error = 0;
+  int timeout = 0;
+  pthread_cond_t cond;
+
+  struct timespec wait_time;
+  struct timeval now;
 
   read(con->sd, buffer, sizeof(pack));
   input = buffer;
@@ -298,44 +371,61 @@ void * handle_connection(void * arg) {
     // the access mode in which they want to open the file descriptor is then checked against the file
     // descriptors already open for that file
     ptr = f_node->list;
-    switch (c_node->perm) {
-    case 0:
-      while (ptr) {
-	if (ptr->con_mode == 2) { valid = 0; break; }
-	if (ptr->con_mode == 1 && 
-	    (ptr->access_mode == O_WRONLY || ptr->access_mode == O_RDWR) &&
-	    (input->access_mode == O_WRONLY || input->access_mode == O_RDWR)) { valid = 0; break; }
-	ptr = ptr->next;
-      }
+    pthread_cond_init(&cond, NULL);
+    while(waiting) {
+      switch (c_node->perm) {
+      case 0:
+        while (ptr) {
+      	  if (ptr->con_mode == 2) { valid = 0; break; }
+	  if (ptr->con_mode == 1 && 
+	      (ptr->access_mode == O_WRONLY || ptr->access_mode == O_RDWR) &&
+	      (input->access_mode == O_WRONLY || input->access_mode == O_RDWR)) { valid = 0; break; }
+	  ptr = ptr->next;
+        }
 
-      break;
+        break;
 
-    case 1:
-      while (ptr) {
-	if (ptr->con_mode == 2) { valid = 0; break; }
-	if ((input->access_mode == O_WRONLY || input->access_mode == O_RDWR) &&
-	    (ptr->access_mode == O_WRONLY || ptr->access_mode == O_RDWR)) { valid = 0; break; }
-	ptr = ptr->next;
-      }
+      case 1:
+        while (ptr) {
+          if (ptr->con_mode == 2) { valid = 0; break; }
+	  if ((input->access_mode == O_WRONLY || input->access_mode == O_RDWR) &&
+	      (ptr->access_mode == O_WRONLY || ptr->access_mode == O_RDWR)) { valid = 0; break; }
+	  ptr = ptr->next;
+        }
 
-      break;
+        break;
 
-    case 2:
-      if (!f_node->list) { valid = 0; }
+      case 2:
+        if (!f_node->list) { valid = 0; }
     
-      break;
+        break;
 
-    default:
-      valid = 0;
+      default:
+        valid = 0;
       
-      break;
-    }
+        break;
+      }
 
   //  while (ptr->next) {
   //   ptr = ptr->next;
   //  }
 
-    if (valid) {
+      if (valid || error) {break;} 
+      else {
+        enqueue(f_node, &cond);
+        gettimeofday(&now, NULL);
+        wait_time.tv_sec = now.tv_sec + 3;
+        wait_time.tv_nsec = now.tv_usec * 1000UL;
+        timeout = pthread_cond_wait(&cond, &(f_node->lock));//, &wait_time);
+      }
+  
+      if (timeout) {
+        pthread_mutex_lock(&(f_node->lock));
+        break;
+      }
+    }
+
+    if(valid) {
       // if the client can access the file, open a new file descriptor
       input->size = open(input->file_name, input->access_mode | O_APPEND | O_CREAT);
       // if the open was successful, add the new file descriptor to the lists
@@ -348,10 +438,19 @@ void * handle_connection(void * arg) {
 //	}
 	c_node->list = add_to_end(c_node->list, new_linknode(input->size, 0, 0, f_node));
       }
+    } else if (timeout) {
+      input->size = -1;
+      errno = timeout;
+      remove_qnode(f_node, &cond);
     } else {
       input->size = -1;
       errno = EPERM;
     }
+
+    if(get_next(f_node) == &cond) {
+       dequeue(f_node);
+    }
+    pthread_cond_destroy(&cond);
 
     pthread_mutex_unlock(&(f_node->lock));
 
@@ -439,6 +538,9 @@ void * handle_connection(void * arg) {
 	pthread_mutex_lock(&(ptr->file_node->lock));
 	printf("Doing weird removal A\n");
         remove_linknode(ptr->file_node->list, input->fd);
+        if(ptr->file_node->front) {
+          pthread_cond_signal(get_next(ptr->file_node));
+        }
 	pthread_mutex_unlock(&(ptr->file_node->lock));
 	
         printf("Doing weird removal B\n");
